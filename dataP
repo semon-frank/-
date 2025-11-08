@@ -1,0 +1,211 @@
+import os
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from tqdm import tqdm
+import logging
+
+# =====================================================
+# 基础设置
+# =====================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+ESS_PATHS = [
+    r"C:\Users\25314\Desktop\ESS\ESS4MDWe04.5_F1.sav",
+    r"C:\Users\25314\Desktop\ESS\ESS5MDWe03.4_F1.sav",
+    r"C:\Users\25314\Desktop\ESS\ESS6MDWe02.4_F1.sav",
+    r"C:\Users\25314\Desktop\ESS\ESS7MDWe02.2_F1.sav",
+    r"C:\Users\25314\Desktop\ESS\ESS8MDWe02.1_F1.sav",
+    r"C:\Users\25314\Desktop\ESS\ESS9MDWe03.1_F1.sav",
+    r"C:\Users\25314\Desktop\ESS\ESS10.csv",
+    r"C:\Users\25314\Desktop\ESS\ESS11.csv"
+]
+
+OUTDIR = r"C:\Users\25314\Desktop\dataP计算结果"
+os.makedirs(OUTDIR, exist_ok=True)
+
+
+# =====================================================
+# 1. 自动检测国家列
+# =====================================================
+def detect_country_col(df):
+    for c in df.columns:
+        cl = c.lower()
+        if any(k in cl for k in ["cntry", "country", "nation", "state"]):
+            if df[c].nunique() > 5:
+                return c
+    return None
+
+
+# =====================================================
+# 2. 加载数据与计算P/S均值
+# =====================================================
+def load_ess(path):
+    logging.info(f"读取 {path}")
+    try:
+        if path.endswith(".sav"):
+            df = pd.read_spss(path)
+        else:
+            df = pd.read_csv(path, low_memory=False)
+    except Exception as e:
+        logging.error(f"❌ 加载失败: {e}")
+        return None
+
+    ccol = detect_country_col(df)
+    if ccol is None:
+        df["cntry"] = os.path.basename(path)
+    else:
+        df = df.rename(columns={ccol: "cntry"})
+
+    # P/S 变量关键字
+    P_keys = ["happy", "trust", "satisf", "life", "free", "respect", "fair", "secure", "value", "confid", "self"]
+    S_keys = ["gov", "pol", "part", "democ", "edu", "science", "culture", "econ", "relig", "media", "tech"]
+
+    P_cols = [c for c in df.columns if any(k in c.lower() for k in P_keys)]
+    S_cols = [c for c in df.columns if any(k in c.lower() for k in S_keys)]
+
+    if len(P_cols) < 5 or len(S_cols) < 5:
+        logging.warning(f"⚠️ {os.path.basename(path)}: P={len(P_cols)}, S={len(S_cols)}")
+
+    df[P_cols + S_cols] = df[P_cols + S_cols].apply(pd.to_numeric, errors="coerce")
+    df["P_mean"] = df[P_cols].mean(axis=1, skipna=True)
+    df["S_mean"] = df[S_cols].mean(axis=1, skipna=True)
+
+    return df[["cntry", "P_mean", "S_mean"]]
+
+
+# =====================================================
+# 3. 回归分析
+# =====================================================
+def regression_analysis(df):
+    df = df.copy()
+    df["ΔP"] = df["P_mean"] - df["P_mean"].mean()
+    df["ΔS"] = df["S_mean"] - df["S_mean"].mean()
+
+    X = sm.add_constant(df["ΔS"])
+    y = df["ΔP"]
+    ols_model = sm.OLS(y, X).fit()
+
+    rf = RandomForestRegressor(n_estimators=300, random_state=42)
+    rf.fit(df[["ΔS"]], y)
+    preds_rf = rf.predict(df[["ΔS"]])
+
+    metrics = {
+        "OLS_R²": ols_model.rsquared,
+        "OLS_MAE": mean_absolute_error(y, ols_model.predict(X)),
+        "RF_R²": r2_score(y, preds_rf),
+        "RF_MAE": mean_absolute_error(y, preds_rf)
+    }
+    return metrics, ols_model, rf
+
+
+# =====================================================
+# 4. 可视化函数
+# =====================================================
+def visualize(df, ols_model, outdir):
+    df["ΔP"] = df["P_mean"] - df["P_mean"].mean()
+    df["ΔS"] = df["S_mean"] - df["S_mean"].mean()
+
+    plt.figure(figsize=(7, 5))
+    plt.scatter(df["ΔS"], df["ΔP"], c="dodgerblue", alpha=0.6, label="国家数据")
+
+    # OLS 拟合线
+    x_pred = np.linspace(df["ΔS"].min(), df["ΔS"].max(), 100)
+    y_ols = ols_model.params[0] + ols_model.params[1] * x_pred
+    plt.plot(x_pred, y_ols, color="red", lw=2, label="OLS 拟合")
+
+    # 多项式拟合（2阶）
+    poly = PolynomialFeatures(degree=2)
+    X_poly = poly.fit_transform(df[["ΔS"]])
+    poly_model = LinearRegression().fit(X_poly, df["ΔP"])
+    y_poly = poly_model.predict(poly.fit_transform(x_pred.reshape(-1, 1)))
+    plt.plot(x_pred, y_poly, color="darkorange", lw=2, ls="--", label="二阶多项式")
+
+    # LOESS平滑
+    loess_fit = lowess(df["ΔP"], df["ΔS"], frac=0.5)
+    plt.plot(loess_fit[:, 0], loess_fit[:, 1], color="green", lw=2, label="LOESS平滑")
+
+    plt.axhline(0, color="gray", lw=0.8, ls="--")
+    plt.axvline(0, color="gray", lw=0.8, ls="--")
+    plt.xlabel("ΔS（社会变化）")
+    plt.ylabel("ΔP（人格变化）")
+    plt.title("ΔP–ΔS 耦合关系（多模型拟合）")
+    plt.legend()
+    plt.tight_layout()
+    outpath = os.path.join(outdir, "ΔP_vs_ΔS_fits.png")
+    plt.savefig(outpath, dpi=300)
+    plt.close()
+    logging.info(f"📊 已生成拟合图：{outpath}")
+
+
+# =====================================================
+# 5. 雷达图：每个国家人格–社会分布
+# =====================================================
+def plot_country_radar(df, outdir):
+    from math import pi
+
+    countries = df["cntry"].unique()
+    num_countries = len(countries)
+    radar_dir = os.path.join(outdir, "国家雷达图")
+    os.makedirs(radar_dir, exist_ok=True)
+
+    for _, row in df.iterrows():
+        values = [row["P_mean"], row["S_mean"]]
+        categories = ["人格(P)", "社会(S)"]
+        values += values[:1]
+        N = len(categories)
+        angles = [n / float(N) * 2 * np.pi for n in range(N)]
+        angles += angles[:1]
+
+        fig, ax = plt.subplots(subplot_kw={'polar': True})
+        plt.xticks(angles[:-1], categories, color="grey", size=10)
+        ax.plot(angles, values, linewidth=2, linestyle='solid')
+        ax.fill(angles, values, alpha=0.25)
+        plt.title(f"{row['cntry']} 的 P–S 均值雷达图", size=12)
+        out_path = os.path.join(radar_dir, f"{row['cntry']}_radar.png")
+        plt.savefig(out_path, dpi=200)
+        plt.close()
+    logging.info(f"📈 已生成 {num_countries} 个国家雷达图至 {radar_dir}")
+
+
+# =====================================================
+# 6. 主函数
+# =====================================================
+def main():
+    dfs = []
+    for path in tqdm(ESS_PATHS, desc="读取 ESS 数据"):
+        df = load_ess(path)
+        if df is not None:
+            dfs.append(df)
+
+    if not dfs:
+        logging.error("❌ 无法加载任何 ESS 文件，请检查路径。")
+        return
+
+    ess_all = pd.concat(dfs, ignore_index=True)
+    ess_country = ess_all.groupby("cntry")[["P_mean", "S_mean"]].mean().reset_index()
+    logging.info(f"✅ 国家层汇总完成，共 {len(ess_country)} 个国家。")
+
+    metrics, ols_model, rf_model = regression_analysis(ess_country)
+    metrics_path = os.path.join(OUTDIR, "ΔP_ΔS_metrics.csv")
+    pd.DataFrame([metrics]).to_csv(metrics_path, index=False)
+    logging.info(f"📁 模型指标已保存至: {metrics_path}")
+
+    visualize(ess_country, ols_model, OUTDIR)
+    plot_country_radar(ess_country, OUTDIR)
+    logging.info("✅ 所有计算与图形输出完成。")
+
+
+# =====================================================
+if __name__ == "__main__":
+    main()
