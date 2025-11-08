@@ -1,0 +1,63 @@
+import os
+import pandas as pd
+import pyreadstat
+import re
+from tqdm import tqdm
+
+ESS_PATHS = {
+    "ESS4": r"C:\Users\25314\Desktop\ESS\ESS4MDWe04.5_F1.sav",
+    "ESS5": r"C:\Users\25314\Desktop\ESS\ESS5MDWe03.4_F1.sav",
+    "ESS6": r"C:\Users\25314\Desktop\ESS\ESS6MDWe02.4_F1.sav",
+    "ESS7": r"C:\Users\25314\Desktop\ESS\ESS7MDWe02.2_F1.sav",
+    "ESS8": r"C:\Users\25314\Desktop\ESS\ESS8MDWe02.1_F1.sav",
+    "ESS9": r"C:\Users\25314\Desktop\ESS\ESS9MDWe03.1_F1.sav",
+    "ESS10": r"C:\Users\25314\Desktop\ESS\ESS10.csv",
+    "ESS11": r"C:\Users\25314\Desktop\ESS\ESS11.csv",
+}
+
+OUTDIR = r"C:\Users\25314\Desktop\dataP计算结果"
+os.makedirs(OUTDIR, exist_ok=True)
+
+# 定义关键词分类字典
+CATEGORY_KEYWORDS = {
+    "P": ["happy", "life", "trust", "respect", "freedom", "value", "confid", "fair", "satisf"],
+    "S": ["gov", "politic", "democ", "econom", "educ", "equality", "science", "relig", "culture", "media", "environ"],
+    "M": ["health", "anxiety", "depress", "stress", "wellbeing", "happiness", "vital", "calm", "mental"]
+}
+
+def detect_category(text):
+    text_lower = str(text).lower()
+    for cat, kws in CATEGORY_KEYWORDS.items():
+        if any(re.search(k, text_lower) for k in kws):
+            return cat
+    return "Other"
+
+def process_ess(path, wave):
+    records = []
+    if path.endswith(".sav"):
+        df, meta = pyreadstat.read_sav(path)
+        for var, label in zip(meta.column_names, meta.column_labels):
+            category = detect_category(label)
+            records.append({"wave": wave, "variable": var, "label": label, "category": category})
+    else:
+        df = pd.read_csv(path, nrows=1)
+        for var in df.columns:
+            category = detect_category(var)
+            records.append({"wave": wave, "variable": var, "label": var, "category": category})
+    return pd.DataFrame(records)
+
+def main():
+    all_records = []
+    for wave, path in tqdm(ESS_PATHS.items(), desc="解析 ESS 变量标签"):
+        try:
+            df_wave = process_ess(path, wave)
+            all_records.append(df_wave)
+        except Exception as e:
+            print(f"{wave} 解析失败: {e}")
+    result = pd.concat(all_records, ignore_index=True)
+    result.to_csv(os.path.join(OUTDIR, "ESS_variable_mapping.csv"), index=False, encoding="utf-8-sig")
+    print(f"✅ 已生成变量映射表，共 {len(result)} 条记录。")
+    print(f"输出文件：{os.path.join(OUTDIR, 'ESS_variable_mapping.csv')}")
+
+if __name__ == "__main__":
+    main()
