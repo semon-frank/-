@@ -1,0 +1,169 @@
+import pandas as pd
+import numpy as np
+import os
+import glob
+import matplotlib.pyplot as plt
+from scipy.stats import zscore
+from sklearn.metrics import mean_absolute_error, r2_score
+from tqdm import tqdm  # 进度条
+from math import pi
+
+
+# 读取 SAV 文件
+def read_sav_file(file_path):
+    """
+    读取 SAV 文件，并返回 DataFrame
+    """
+    try:
+        df = pd.read_spss(file_path)  # 假设你安装了 pyreadstat 库，支持 SAV 文件读取
+        print(f"成功读取文件: {file_path}")
+        return df
+    except Exception as e:
+        print(f"读取文件 {file_path} 时出错: {e}")
+        return None
+
+
+# 读取所有 ESS 数据
+def load_ess_data(file_paths):
+    """
+    加载多个 ESS 数据文件，合并成一个 DataFrame
+    """
+    dfs = []
+    for path in file_paths:
+        df = read_sav_file(path)
+        if df is not None:
+            dfs.append(df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+
+# 提取并计算维度得分
+def calculate_scores(df, social_mapping, personality_mapping, social_weight=1.0, personality_weight=1.0):
+    """
+    根据映射表对 ESS 数据进行计算
+    """
+    # 社会维度问题的处理
+    social_scores = []
+    for question in social_mapping:
+        if question in df.columns:
+            social_scores.append(df[question].apply(pd.to_numeric, errors="coerce"))
+
+    if social_scores:
+        social_scores_df = pd.concat(social_scores, axis=1)
+        social_scores_mean = social_scores_df.mean(axis=1) * social_weight  # 加权求平均
+    else:
+        social_scores_mean = pd.Series([np.nan] * len(df))
+
+    # 人格维度问题的处理
+    personality_scores = []
+    for question in personality_mapping:
+        if question in df.columns:
+            personality_scores.append(df[question].apply(pd.to_numeric, errors="coerce"))
+
+    if personality_scores:
+        personality_scores_df = pd.concat(personality_scores, axis=1)
+        personality_scores_mean = personality_scores_df.mean(axis=1) * personality_weight  # 加权求平均
+    else:
+        personality_scores_mean = pd.Series([np.nan] * len(df))
+
+    # 返回计算结果
+    df['social_score'] = social_scores_mean
+    df['personality_score'] = personality_scores_mean
+    return df
+
+
+# 计算 R2 和 MAE
+def calculate_r2_mae(df):
+    """
+    计算 R² 和 MAE
+    """
+    y_true = df['social_score']  # 假设社会维度为真实值
+    y_pred = df['personality_score']  # 假设人格维度为预测值
+
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+
+    return r2, mae
+
+
+# 绘制雷达图
+def plot_radar_chart(df, countries, social_weight=1.0, personality_weight=1.0):
+    """
+    为每个国家绘制雷达图
+    """
+    categories = ['P_mean', 'S_mean']  # 维度
+    for country in countries:
+        country_data = df[df['country'] == country]
+        if not country_data.empty:
+            social_score = country_data['social_score'].values[0]
+            personality_score = country_data['personality_score'].values[0]
+
+            scores = [social_score * social_weight, personality_score * personality_weight]
+            labels = categories
+
+            # 雷达图准备
+            angles = np.linspace(0, 2 * np.pi, len(categories), endpoint=False).tolist()
+            scores += scores[:1]
+            angles += angles[:1]
+
+            fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+            ax.fill(angles, scores, color='red', alpha=0.25)
+            ax.plot(angles, scores, color='red', linewidth=2)
+            ax.set_yticklabels([])  # 不显示雷达图的刻度
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels(labels)
+            ax.set_title(f"Radar Chart for {country}")
+            plt.show()
+
+
+# 保存结果
+def save_results(df, output_path):
+    """
+    将结果保存到 CSV 文件中
+    """
+    df.to_csv(output_path, index=False)
+    print(f"结果已保存至: {output_path}")
+
+
+# 主程序
+def main():
+    # 配置路径和文件
+    ess_files = [
+        r"C:\Users\25314\Desktop\ESS\ESS4MDWe04.5_F1.sav",
+        r"C:\Users\25314\Desktop\ESS\ESS5MDWe03.4_F1.sav",
+        r"C:\Users\25314\Desktop\ESS\ESS6MDWe02.4_F1.sav",
+        r"C:\Users\25314\Desktop\ESS\ESS7MDWe02.2_F1.sav",
+        r"C:\Users\25314\Desktop\ESS\ESS8MDWe02.1_F1.sav",
+        r"C:\Users\25314\Desktop\ESS\ESS9MDWe03.1_F1.sav",
+        r"C:\Users\25314\Desktop\ESS\ESS10.csv",
+        r"C:\Users\25314\Desktop\ESS\ESS11.csv"
+    ]
+
+    # 示例映射数据，真实映射数据需要根据问卷内容和目标列来填写
+    social_mapping = ['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', 'q8', 'q9', 'q10']  # 社会维度问题列名
+    personality_mapping = ['q11', 'q12', 'q13', 'q14', 'q15', 'q16', 'q17', 'q18', 'q19', 'q20']  # 人格维度问题列名
+
+    # 权重
+    social_weight = 1.4  # 社会维度权重
+    personality_weight = 0.6  # 人格维度权重
+
+    # 加载 ESS 数据
+    ess_data = load_ess_data(ess_files)
+
+    # 计算社会维度和人格维度得分
+    ess_data = calculate_scores(ess_data, social_mapping, personality_mapping, social_weight, personality_weight)
+
+    # 计算 R2 和 MAE
+    r2, mae = calculate_r2_mae(ess_data)
+    print(f"R²: {r2:.4f}, MAE: {mae:.4f}")
+
+    # 绘制雷达图
+    countries = ess_data['country'].unique()
+    plot_radar_chart(ess_data, countries, social_weight, personality_weight)
+
+    # 输出结果
+    output_path = r"C:\Users\25314\Desktop\H2验证\ESS_analysis_result.csv"
+    save_results(ess_data, output_path)
+
+
+if __name__ == "__main__":
+    main()
